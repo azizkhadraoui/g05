@@ -1,0 +1,11 @@
+results/
+logs/
+runs/
+models/
+hf_cache/
+__pycache__/
+*.pt
+*.npy
+*.npz
+*.mp4
+.venv*/
