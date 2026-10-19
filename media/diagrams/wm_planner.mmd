@@ -1,0 +1,9 @@
+flowchart TB
+  OBS["observation"] --> P["G0.5 proposes one 32-step chunk per candidate command (K=10)"]
+  OBS --> FE["DINOv3 features"]
+  P --> R["world model rolls each chunk 4 x 0.4 s"]
+  FE --> R
+  GV["goal video: demo features at t + 1.6 s"] --> S["score: distance of predicted future to goal frame"]
+  R --> S
+  S --> EX["execute the best chunk for 10 steps (0.5 s)"]
+  EX --> OBS

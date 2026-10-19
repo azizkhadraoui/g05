@@ -1,0 +1,5 @@
+flowchart TB
+  CAM["camera, every step"] --> D["DINOv3 features"] --> BUF["episode buffer"]
+  BUF -->|"at 2 s, when the instruction disappears"| SEL["select frames: current / first / 1-8 s back / snapshots"]
+  SEL --> CLS["task decoder, 3M parameters; trained on human demos"]
+  CLS --> TXT["recognised instruction text"] --> G["G0.5 prompt for the rest of the episode"]

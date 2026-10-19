@@ -1,0 +1,8 @@
+flowchart TB
+  CAM["camera, 5 Hz"] --> D["DINOv3 features"] --> BUF["episode buffer"]
+  BUF --> SEL["8 frames spread over the whole episode + current frame"]
+  SEL --> CNT["cycle counter; trained on demos with geometric labels"]
+  N["N from the instruction, e.g. '3 times'"] --> CMP{"count >= N on 2 readings?"}
+  CNT --> CMP
+  CMP -->|no| G["G0.5 keeps executing 'pick up the bowl and place it back'"]
+  CMP -->|yes| STOP["halt: send no-op actions"]

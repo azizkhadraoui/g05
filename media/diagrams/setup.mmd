@@ -1,0 +1,11 @@
+flowchart LR
+  subgraph G05["G0.5 policy (frozen unless stated)"]
+    VLM["Qwen3.5-2B VLM"] --> AE["24-layer flow-matching action expert"]
+  end
+  CAM["agent + wrist cameras"] --> VLM
+  TXT["instruction"] --> VLM
+  AE --> ACT["32-step action chunk; 10 steps executed"]
+  CAM --> DINO["DINOv3 ViT-B/16, frozen"]
+  DINO --> FEAT["8x8x768 feature tokens"]
+  FEAT --> WM["latent world model: LaWAM 538M or ours 3-43M"]
+  FEAT --> MEM["memory modules"]

@@ -1,0 +1,8 @@
+flowchart TB
+  F["DINOv3 features u_t"] --> DEC["LaWAM decoder"]
+  V["G0.5 VLM states"] --> PR["prior P: latent action z"]
+  PR --> DEC
+  DEC --> UH["predicted features at t+0.4 s"]
+  F --> AD["adapter: resamplers + zero-init cross-attention"]
+  UH --> AD
+  AD -->|"injected into expert layers 2,5,...,23"| AE["G0.5 action expert"]

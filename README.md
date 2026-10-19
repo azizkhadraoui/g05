@@ -63,19 +63,7 @@
 
 ## 3. Setup
 
-```mermaid
-flowchart LR
-  subgraph G05["G0.5 policy (frozen unless stated)"]
-    VLM["Qwen3.5-2B VLM"] --> AE["24-layer flow-matching action expert"]
-  end
-  CAM["agent + wrist cameras"] --> VLM
-  TXT["instruction"] --> VLM
-  AE --> ACT["32-step action chunk; 10 steps executed"]
-  CAM --> DINO["DINOv3 ViT-B/16, frozen"]
-  DINO --> FEAT["8x8x768 feature tokens"]
-  FEAT --> WM["latent world model: LaWAM 538M or ours 3-43M"]
-  FEAT --> MEM["memory modules"]
-```
+<p align="center"><img src="media/diagrams/setup.png" width="1220" alt="Setup: cameras and instruction feed G0.5 (VLM + action expert); frozen DINOv3 features feed the world model and the memory modules"></p>
 
 | Part | Details |
 |---|---|
@@ -124,16 +112,7 @@ Original protocol: "G0.5 FM + LaWAM, H200 protocol v2", 33 groups. ✅ done · �
 - Variants: F01 = current features; F02 = LaWAM-predicted future, staged training; J1 / J2 / J3 = joint training (detached / end-to-end / future dropout).
 - Test: the 6 hardest tasks × 20 paired trials.
 
-```mermaid
-flowchart LR
-  F["DINOv3 features u_t"] --> DEC["LaWAM decoder"]
-  V["G0.5 VLM states"] --> PR["prior P: latent action z"]
-  PR --> DEC
-  DEC --> UH["predicted features at t+0.4 s"]
-  F --> AD["adapter: resamplers + zero-init cross-attention"]
-  UH --> AD
-  AD -->|"injected into expert layers 2,5,...,23"| AE["G0.5 action expert"]
-```
+<p align="center"><img src="media/diagrams/lawam_injection.png" width="420" alt="LaWAM inside G0.5: the LaWAM decoder predicts features 0.4 s ahead; an adapter injects current and predicted features into the action expert"></p>
 
 **World-model quality**
 
@@ -212,17 +191,7 @@ flowchart LR
 - Input: **no instruction**, only a goal video (demo features of the target task, indexed by time).
 - Policy: frozen G0.5. Planner: our 43M world model.
 
-```mermaid
-flowchart LR
-  OBS["observation"] --> P["G0.5 proposes one 32-step chunk per candidate command (K=10)"]
-  OBS --> FE["DINOv3 features"]
-  P --> R["world model rolls each chunk 4 x 0.4 s"]
-  FE --> R
-  GV["goal video: demo features at t + 1.6 s"] --> S["score: distance of predicted future to goal frame"]
-  R --> S
-  S --> EX["execute the best chunk for 10 steps (0.5 s)"]
-  EX --> OBS
-```
+<p align="center"><img src="media/diagrams/wm_planner.png" width="560" alt="World-model planner loop: G0.5 proposes chunks, the world model rolls them out, the chunk closest to the goal frame is executed"></p>
 
 **Results**
 
@@ -291,13 +260,7 @@ flowchart LR
 - LIBERO-Goal, 100 paired episodes. The instruction is removed at 2 s.
 - The module stores DINOv3 features of every frame. At 2 s, a 3M task decoder (trained on human demos) names the task from selected frames, and the text goes back into G0.5's prompt.
 
-```mermaid
-flowchart LR
-  CAM["camera, every step"] --> D["DINOv3 features"] --> BUF["episode buffer"]
-  BUF -->|"at 2 s, when the instruction disappears"| SEL["select frames: current / first / 1-8 s back / snapshots"]
-  SEL --> CLS["task decoder, 3M parameters; trained on human demos"]
-  CLS --> TXT["recognised instruction text"] --> G["G0.5 prompt for the rest of the episode"]
-```
+<p align="center"><img src="media/diagrams/mem2_module.png" width="260" alt="MEM-2 memory module: stored DINOv3 features, frame selection at 2 s, task decoder, recognised instruction back into the G0.5 prompt"></p>
 
 **Results**
 
@@ -340,16 +303,7 @@ flowchart LR
 - Test: 6 repetition tasks × 20 held-out start states.
 - Full-length episodes: success is the benchmark's overshoot-aware check at the end, so extra cycles count as failure.
 
-```mermaid
-flowchart LR
-  CAM["camera, 5 Hz"] --> D["DINOv3 features"] --> BUF["episode buffer"]
-  BUF --> SEL["8 frames spread over the whole episode + current frame"]
-  SEL --> CNT["cycle counter; trained on demos with geometric labels"]
-  N["N from the instruction, e.g. '3 times'"] --> CMP{"count >= N on 2 readings?"}
-  CNT --> CMP
-  CMP -->|no| G["G0.5 keeps executing 'pick up the bowl and place it back'"]
-  CMP -->|yes| STOP["halt: send no-op actions"]
-```
+<p align="center"><img src="media/diagrams/lmem_counter.png" width="440" alt="LIBERO-Mem counter module: whole-episode frames feed a cycle counter; G0.5 is halted once the count reaches N"></p>
 
 | Condition | Expert fine-tune | Adapter fine-tune |
 |---|---|---|
@@ -491,6 +445,7 @@ Paired McNemar tests, expert fine-tune: **C vs A: p = 0.003** · **C vs D: p = 5
 | LIBERO-Mem | `libero_mem/` (fork + raw demos), `jobs/43–48, 51, 52, 54`, `results/lmem_*` |
 | T4/V100 port | `jobs/t4_fp16.py`, `serve_policy_hybrid.py`, `07b_train_lmem.py`, `GalaxeaVLA/.venv_sm70` |
 | Figures and demo media | `media/` (from `media/make_figs.py`; GIFs from `jobs/56_demos.sh`, `57_demo_gifs.py`, `58_compare_gifs.py`) |
+| Diagrams | `media/diagrams/*.png`, rendered from the mermaid sources `media/diagrams/*.mmd` (mermaid 11.4.1) |
 
 ---
 
