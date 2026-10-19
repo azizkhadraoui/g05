@@ -134,6 +134,10 @@ def _halt_load(mode, dec_path, n_target):
     import lawam_hybrid as _H
     from mem_decoder import Decoder as _D
     cfg = {"mode": mode, "n": n_target}
+    if mode in ("vlm", "vlm_current"):  # RoboBrain counts completed cycles from frames (second GPU)
+        from robobrain import RoboBrain
+        cfg.update(vlm=RoboBrain(VLM_ARGS["path"], device=VLM_ARGS["device"]), obj=VLM_ARGS["obj"], every=VLM_ARGS["every"])
+        return cfg
     if mode in ("memory", "current"):
         ck = _t.load(dec_path, map_location="cpu", weights_only=False)
         d = _D(ck["n_frames"], 9); d.load_state_dict(ck["model"]); d.eval().cuda()
@@ -141,6 +145,36 @@ def _halt_load(mode, dec_path, n_target):
         lam.vision_encoder.to("cuda")
         cfg.update(dec=d, cond=ck["cond"], lam=lam, H=_H)
     return cfg
+
+
+VLM_ARGS: dict = {}
+
+
+def _halt_update_vlm(obs_list, active):
+    """1 Hz: RoboBrain answers 'how many cycles so far?' from 8 frames over the episode + now (or now only); halt at N."""
+    from robobrain import count_prompt, first_int
+    q = []
+    for i, ob in enumerate(obs_list):
+        if ob is None or not active[i] or HALT.get(i):
+            continue
+        HSTEP[i] = HSTEP.get(i, 0) + 1
+        if (HSTEP[i] - 1) % 4 == 0:
+            HBUF.setdefault(i, []).append(extract_libero_images(ob)["image"])
+        if HSTEP[i] > 20 and HSTEP[i] % HALT_CFG["every"] == 0 and HBUF.get(i):
+            q.append(i)
+    if not q:
+        return
+    multi = HALT_CFG["mode"] == "vlm"
+    batch = []
+    for i in q:
+        buf = HBUF[i]; t = len(buf) - 1
+        ims = [buf[(t * j) // 8] for j in range(8)] + [buf[t]] if multi else [buf[t]]
+        batch.append((ims, count_prompt(HALT_CFG["obj"], len(ims), "multi" if multi else "current")))
+    for i, ans in zip(q, HALT_CFG["vlm"].ask(batch, max_new_tokens=6)):
+        pred = first_int(ans, 0, 50)
+        HPRED.setdefault(i, []).append(-1 if pred is None else pred)
+        if pred is not None and pred >= HALT_CFG["n"]:
+            HALT[i] = True; TRIAL_HALT[i] = HSTEP[i]
 
 
 def _halt_frames(buf):
@@ -164,6 +198,8 @@ def _halt_update(obs_list, active):
     import torch.nn.functional as _F
     if HALT_CFG is None or HALT_CFG["mode"] == "none":
         return
+    if HALT_CFG["mode"] in ("vlm", "vlm_current"):
+        return _halt_update_vlm(obs_list, active)
     newf = []
     for i, ob in enumerate(obs_list):
         if ob is None or not active[i] or HALT.get(i):
@@ -780,6 +816,7 @@ async def evaluate(args, cfg, embodiment_type: str | None) -> dict[str, Any]:
     if args.memory_decoder:
         MEM = _mem_load(args.memory_decoder, args.memory_tau)
     if args.halt_mode != "none":
+        VLM_ARGS.update(path=args.count_vlm, device=args.vlm_device, obj=args.count_object, every=args.vlm_every)
         HALT_CFG = _halt_load(args.halt_mode, args.count_decoder, args.n_target)
     ensure_libero_import()
     ensure_libero_config()
@@ -912,7 +949,11 @@ def parse_args():
     parser.add_argument("--max_steps", type=int, default=None, help="override the per-suite step budget (LIBERO-Mem)")
     parser.add_argument("--init_offset", type=int, default=0, help="first initial state to use (LIBERO-Mem held-out: 100)")
     parser.add_argument("--prompt_text", default=None, help="instruction given to the policy instead of the task's own")
-    parser.add_argument("--halt_mode", default="none", choices=["none", "memory", "current", "oracle"])
+    parser.add_argument("--halt_mode", default="none", choices=["none", "memory", "current", "oracle", "vlm", "vlm_current"])
+    parser.add_argument("--count_vlm", default=None, help="RoboBrain checkpoint dir (halt_mode vlm / vlm_current)")
+    parser.add_argument("--count_object", default="bowl", choices=["bowl", "bottle"])
+    parser.add_argument("--vlm_every", type=int, default=20, help="query RoboBrain every N env steps")
+    parser.add_argument("--vlm_device", default="cuda:1")
     parser.add_argument("--count_decoder", default=None)
     parser.add_argument("--n_target", type=int, default=1)
     parser.add_argument("--num_trials_per_task", type=int, default=50)

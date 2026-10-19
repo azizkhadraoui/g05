@@ -12,6 +12,7 @@
 | Does **memory** help a Markovian VLA? | **Yes, as an external module.** Instruction withdrawn: **40% → 86%**. LIBERO-Mem repetition tasks: **5.8% → 19.2%**, while a no-memory control stays at 4.2%. |
 | Can we improve **steerability**? | **Only modestly.** Recovery fine-tuning: **20% → 28%** vs its matched control (p = 0.008), which is back to G0.5's own 29%. A planner cannot add steerability. |
 | Does feeding a **pretrained world model's predictions into the policy** help? | **No.** Staged injection *hurts* (−7.5 pts, p = 0.012); joint training is neutral. |
+| Can an off-the-shelf **embodied VLM (RoboBrain)** be the high-level layer? | **As a planner from a goal image, partly:** 42% vs 24% for our world model given the same image (p = 0.005), but below the world model with subgoals (77%). **As memory or counter, no:** zero-shot it barely recognises LIBERO scenes (36% vs 40% without memory; 2.5% vs 5.8% on LIBERO-Mem). |
 
 ---
 
@@ -28,6 +29,7 @@
    - 5.4 [Steerability](#54-steerability)
    - 5.5 [Memory](#55-memory)
    - 5.6 [What happened with 3D-Mem snapshots](#56-what-happened-with-3d-mem-snapshots)
+   - 5.7 [RoboBrain as the high-level layer](#57-robobrain-as-the-high-level-layer)
 6. [How this carries over to our policy, our data and the real robot](#6-how-this-carries-over-to-our-policy-our-data-and-the-real-robot)
 7. [Limitations](#7-limitations)
 8. [Engineering notes and reproducibility](#8-engineering-notes-and-reproducibility)
@@ -122,7 +124,7 @@ The original protocol ("G0.5 FM + LaWAM, H200 protocol v2") had 33 groups. Statu
 | *(added)* LIBERO-Mem | Standard non-Markovian benchmark: zero-shot, offline memory, closed-loop memory module | ✅ |
 | *(added)* WM-1 / WM-MEM | World-model scaling and ablations; memory in the world model | ✅ |
 | M00 / M01 / M03 | Minute-scale memory (10–900 s) | ✗ needs long-episode task suites (§6) |
-| H00–H04 | High-level planner / verifier | ✗ (the planner results show it is needed for long horizons) |
+| H00–H04 | High-level planner / verifier | ◐ zero-shot RoboBrain as memory, counter and goal-image planner (§5.7); VLM + world-model hierarchy not yet run |
 | G00, I00, C00/C01, D00 | Generalisation (LIBERO-Plus/PRO), in-context learning, continual learning, data efficiency | ✗ out of time (D00 done for the world model only) |
 | X01 / X02 | Real embodiment; memory revision | ✗ / ◐ (revision probes) |
 
@@ -361,6 +363,36 @@ We adapted 3D-Mem's snapshot selection to manipulation:
 
 **Next step: event-indexed snapshots.** Write a snapshot at every completed sub-step and keep them all. The memory then *is* the progress state, and it stays compact for minutes-long episodes.
 
+### 5.7 RoboBrain as the high-level layer
+
+Our memory modules and planner relied on LIBERO-specific pieces: classifiers trained on LIBERO demos, a fixed list of LIBERO commands, and demo goal videos. A general embodied VLM would remove those dependencies. We tested **RoboBrain** (BAAI [[8]](#ref8)), a Qwen-VL model trained for embodied pointing, planning and video reasoning that outputs text, points and trajectories (no actions). It ran **zero-shot** in all three roles, on its own GPU next to the G0.5 server.
+
+![RoboBrain results](media/fig9_robobrain.png)
+
+**Offline, held-out LIBERO-Goal demos (chance 10%):**
+
+| Question | RoboBrain 2.0-3B | RoboBrain 2.5-4B |
+|---|---|---|
+| Which task is the robot doing? (5 frames over 2 s) | 9% | 16% |
+| Same, current frame only | 6% | 9% |
+| Which command reaches this goal image? | 6% | **37%** |
+
+The models barely perceive LIBERO's 256-px simulated scenes. 2.0-3B describes a frame as "a table with a black and white square box, a round object…", with no robot arm, stove or cabinet. Neither prompt format (numbers, letters, free text), resolution nor precision (fp16 vs fp32) changes this.
+
+**Closed loop (RoboBrain 2.5-4B), paired with the earlier runs:**
+
+| Role | Without | **RoboBrain** | Task-trained module | Notes |
+|---|---|---|---|---|
+| MEM-2 memory: instruction withdrawn at 2 s, re-issue the task | 40% (no memory) | 36% (5 frames); 31% (current frame) | **86%** (trained classifier) | Names the right task only 18% of the time; wrong reminders hurt (current frame vs none: p = 0.05) |
+| LIBERO-Mem counter: count cycles, stop at N | 5.8% (fine-tuned G0.5 alone) | 2.5% (whole episode); 4.2% (current frame) | **19.2%** (trained counter) | Answers "1" at the start of single-repeat tasks (stops immediately) and never reaches 5–7 |
+| **Planner given a single goal image** | 2% (random command) | **42%** (re-chosen every 2 s) | 24%: our world model with the **same** goal image | RoboBrain vs world model: **p = 0.005**. The world model with a goal *video* gets **77%** (p = 5e-6 vs RoboBrain). |
+
+**What this means:**
+- **A general embodied VLM is not grounded enough in this simulator** to replace a task-trained memory or counter zero-shot. In this setup, a grounded perception module still beats general reasoning.
+- **Choosing a goal is where the VLM helps.** It is better than greedy world-model matching when only a distant final image is available: semantic "which instruction produces this end state" reasoning beats feature distance to a far-away goal.
+- **The roles are complementary.** The world model needs near-term subgoals and the VLM is good at choosing goals. The natural architecture is a **VLM that proposes the sub-goal or command, a world model that checks the near-term chunks, and G0.5 that executes them.** That is the next experiment to run.
+- **Expect better on real data.** RoboBrain was trained on real and egocentric images, so it should do better on our robot's camera than on LIBERO renders. That is worth checking before writing it off.
+
 ---
 
 ## 6. How this carries over to our policy, our data and the real robot
@@ -372,13 +404,14 @@ We adapted 3D-Mem's snapshot selection to manipulation:
 | **Memory module, re-prompting (A)** | 40% → 86% when the instruction is lost | Replace the closed-set task classifier with a **VLM reading episode keyframes** that writes the current sub-instruction (open-vocabulary) | Runs as a supervisor at about 1 Hz over the VLA. Useful after interruptions, in multi-step jobs ("cup already in the sink, now wipe the table"), and when tasks are given by demonstration. | VLM latency and errors; a wrong reminder is worse than none (task 8 lost trials). |
 | **Memory module, progress / count / stop (B)** | 5.8% → 19.2% on LIBERO-Mem; a Markovian control gives no gain | Progress labels from gripper + object events (as here) or VLM annotation of demo segments. **Event-indexed snapshot memory** for minute-scale tasks. | Counting and completion detection: "stir 3 times", "fasten 4 screws", "place N items" | The learned counter gets ~40% of a perfect counter's gain; needs more robust event detection (object-centric tracking or a VLM). |
 | **Steerability** | G0.5 switches 29%; recovery data +8 pts vs control | Collect recovery and intervention data on our robot (teleop corrections, DAgger rounds). **Full fine-tune with a small replay buffer** ([[5]](#ref5) says it limits forgetting). Evaluate with switch probes plus LIBERO-PRO-style language perturbations. | Mid-task corrections from an operator or a high-level planner | Needs much more recovery data than 145 episodes; adapter-only fine-tunes cap the gain. |
+| **Embodied VLM as high-level layer (RoboBrain)** | Goal image → command: 42% (beats our world model's 24% with the same image). Zero-shot memory or counting: no gain. | Use it to **choose goals and sub-instructions**, and let the world model check near-term chunks. Fine-tune on a few hundred labelled frames of our scenes before using it as memory. | Natural input is the real camera, closer to its training data than LIBERO renders | Latency (0.1–0.5 s per query on T4); weak perception of small or unusual objects |
 | **Continual learning** | Not run; the replay setting kept old skills | Use experience replay with small buffers when adding skills ([[5]](#ref5)) | — | Verify on our own task sequence. |
 
 **Suggested next steps, in order of value per compute:**
 1. **World-model critic on our data.** Train the 43M world model on our own robot data, then run best-of-K sampling with G0.5 in our simulator or in offline replays.
 2. **Event-indexed memory.** Run it on LIBERO-Mem, then on a minute-scale task suite built from chained LIBERO tasks (M00/M01).
 3. **Full G0.5 fine-tunes on H200.** Use them for steering recovery (more data) and for LIBERO-Mem, with the startup team's training optimisations (≈50–55 windows/s).
-4. **High-level subgoal planner (H00).** A VLM or video model that supplies subgoals to the world-model planner, so it works on long-horizon tasks.
+4. **High-level subgoal planner (H00): VLM + world-model hierarchy.** A VLM (e.g. RoboBrain, fine-tuned on a few hundred frames of our scenes) proposes the command or subgoal, the world model checks G0.5's near-term chunks, and G0.5 executes. §5.7 shows the two are complementary: the VLM is better at choosing goals, the world model at near-term matching.
 
 ---
 
@@ -445,5 +478,7 @@ All scripts source `env_g05.sh`, which sets `G05_ROOT` and the paths. They are S
 <a id="ref5"></a>[5] H. Liu, C. Kim, B. Liu, M. Liu, Y. Zhu. **Pretrained Vision-Language-Action Models are Surprisingly Resistant to Forgetting in Continual Learning.** ICML 2026, arXiv:2603.03818. [paper](https://arxiv.org/abs/2603.03818)
 
 <a id="ref6"></a>[6] Chung et al. **LIBERO-Mem / Rethinking Progression of Memory State in Robotic Manipulation: An Object-Centric Perspective.** arXiv:2511.11478. [paper](https://arxiv.org/abs/2511.11478) · [code](https://github.com/libero-mem/libero-mem)
+
+<a id="ref8"></a>[8] BAAI. **RoboBrain 2.0 / 2.5.** arXiv:2507.02029. [model](https://huggingface.co/BAAI/RoboBrain2.0-3B) · [code](https://github.com/FlagOpen/RoboBrain2.0)
 
 [7] Galaxea **G0.5** ([GalaxeaVLA](https://github.com/OpenGalaxea/GalaxeaVLA)) · B. Liu et al. **LIBERO** benchmark.

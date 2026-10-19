@@ -4,7 +4,8 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 
-OUT = "c:/Users/aziz/Desktop/work/roboteur/g05 LaWAM/media"
+import os
+OUT = os.path.dirname(os.path.abspath(__file__))
 plt.rcParams.update({"font.size": 10, "axes.spines.top": False, "axes.spines.right": False, "figure.dpi": 130})
 BLUE, ORANGE, GREEN, RED, GREY, PURPLE = "#2b6cb0", "#dd6b20", "#2f855a", "#c53030", "#a0aec0", "#6b46c1"
 
@@ -121,3 +122,23 @@ ax.set_xticks(x); ax.set_xticklabels(t, fontsize=8.5); ax.set_ylabel("subgoal co
 ax.set_title("LIBERO-Mem: G0.5 does single pick-and-place but cannot track progress", fontsize=10.5)
 plt.tight_layout(); plt.savefig(f"{OUT}/fig7_libero_mem_zeroshot.png"); plt.close()
 print("ok")
+
+# ---- Fig 9: RoboBrain as the high-level layer ----
+fig, axs = plt.subplots(2, 2, figsize=(13, 8.6)); axs = axs.ravel()
+x = np.arange(3); w = 0.38
+axs[0].bar(x - w / 2, [9, 6, 6], w, color=GREY, label="RoboBrain 2.0-3B")
+axs[0].bar(x + w / 2, [16, 9, 37], w, color=PURPLE, label="RoboBrain 2.5-4B")
+for xi, a_, b_ in zip(x, [9, 6, 6], [16, 9, 37]):
+    axs[0].text(xi - w / 2, a_ + 1, f"{a_}", ha="center", fontsize=8.5); axs[0].text(xi + w / 2, b_ + 1, f"{b_}", ha="center", fontsize=8.5)
+axs[0].axhline(10, color="k", lw=0.8, ls=":"); axs[0].set_xticks(x)
+axs[0].set_xticklabels(["which task?\n(5 frames)", "which task?\n(current frame)", "which command\nreaches goal image?"], fontsize=8.5)
+axs[0].set_ylim(0, 50); axs[0].set_ylabel("accuracy (%)"); axs[0].legend(fontsize=8)
+axs[0].set_title("Zero-shot on held-out LIBERO-Goal demos\n(dotted = chance)", fontsize=10.5)
+bars(axs[1], ["no memory", "RoboBrain\ncurrent frame", "RoboBrain\n5 frames", "trained\nclassifier"], [40, 31, 36, 86], [RED, GREY, PURPLE, GREEN],
+     "MEM-2: instruction withdrawn at 2 s\n(100 paired episodes)")
+bars(axs[2], ["random\ncommand", "our WM\n(goal image)", "RoboBrain\n(goal image)", "our WM\n(goal video)", "correct\ninstruction"], [2, 24, 42, 77, 98],
+     [GREY, BLUE, PURPLE, BLUE, GREY], "Planning over frozen G0.5\n(100 paired episodes)")
+bars(axs[3], ["G0.5 FT\nalone", "RoboBrain\ncurrent", "RoboBrain\nwhole episode", "trained\ncounter", "perfect\ncounter"], [5.8, 4.2, 2.5, 19.2, 41.7],
+     [GREY, GREY, PURPLE, GREEN, GREY], "LIBERO-Mem: count cycles and stop\n(120 held-out episodes)", ylim=50)
+plt.tight_layout(); plt.savefig(f"{OUT}/fig9_robobrain.png"); plt.close()
+print("fig9 ok")

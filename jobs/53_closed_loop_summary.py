@@ -26,7 +26,7 @@ for run in sorted(glob.glob(f"{R}/lmem_cl/*")):
     if name.startswith("smoke"):
         continue
     conds = {}
-    for cdir in sorted(glob.glob(f"{run}/[A-E]")):
+    for cdir in sorted(glob.glob(f"{run}/[A-G]")):
         c = os.path.basename(cdir); trials = {}; sub = []; per_task = {}
         for tdir in sorted(glob.glob(f"{cdir}/t*")):
             f = glob.glob(f"{tdir}/*_parallel_results.json")
@@ -45,7 +45,7 @@ for run in sorted(glob.glob(f"{R}/lmem_cl/*")):
             conds[c] = {"success": sum(trials.values()) / len(trials), "n": len(trials), "subgoal_completion": sum(sub) / max(len(sub), 1),
                         "per_task": per_task, "_trials": trials}
     pairs = {}
-    for a_, b_ in [("A", "C"), ("B", "C"), ("D", "C"), ("C", "E"), ("A", "E")]:
+    for a_, b_ in [("A", "C"), ("B", "C"), ("D", "C"), ("C", "E"), ("A", "E"), ("A", "F"), ("G", "F"), ("F", "C")]:
         if a_ in conds and b_ in conds:
             pairs[f"{a_}_vs_{b_}"] = mcnemar(conds[a_]["_trials"], conds[b_]["_trials"])
     for v in conds.values():
@@ -53,10 +53,11 @@ for run in sorted(glob.glob(f"{R}/lmem_cl/*")):
     out.setdefault("memory_libero_mem", {})[name] = {"conditions": conds, "paired": pairs}
 
 # ---------------- memory: MEM-2 (LIBERO-Goal instruction withdrawal) ----------------
-m2 = f"{R}/mem2/B00t4/mem2_summary.json"
-if os.path.exists(m2):
-    s = json.load(open(m2))
-    out["memory_mem2"] = {c: {"rate": v["rate"], "n": v["total"], "memory_inference_acc": v.get("memory_inference_acc")} for c, v in s.items()}
+for pol in ("B00t4", "RB25", "RB20"):
+    m2 = f"{R}/mem2/{pol}/mem2_summary.json"
+    if os.path.exists(m2):
+        s2 = json.load(open(m2))
+        out.setdefault("memory_mem2", {})[pol] = {c: {"rate": v["rate"], "n": v["total"], "memory_inference_acc": v.get("memory_inference_acc")} for c, v in s2.items()}
 
 
 # ---------------- steering: recovery fine-tune vs matched control ----------------
@@ -117,7 +118,8 @@ def planner(prefix):
     return {"modes": modes, "paired": pairs}
 
 
-plan = {"goal_video": planner("full"), "goal_switch_at_2s": planner("switch")}
+plan = {"goal_video": planner("full"), "goal_switch_at_2s": planner("switch"), "goal_image_vlm": planner("vlm_goalimg"),
+        "goal_image_wm": planner("wm_goalimg")}
 out["world_model_planner"] = plan
 json.dump(out, open(f"{R}/closed_loop_summary.json", "w"), indent=2)
 print(json.dumps(out, indent=1)[:12000])

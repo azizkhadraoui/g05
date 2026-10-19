@@ -44,7 +44,7 @@ from scripts.utils.policy_ws_client import MultiPolicyWSClient  # noqa: E402
 
 p = argparse.ArgumentParser()
 p.add_argument("--server_uri", required=True)
-p.add_argument("--mode", required=True, choices=["wm", "wm_commit", "random", "blank", "oracle"])
+p.add_argument("--mode", required=True, choices=["wm", "wm_commit", "random", "blank", "oracle", "vlm"])
 p.add_argument("--task_ids", default="0,1,2,3,4,5,6,7,8,9")
 p.add_argument("--trials", type=int, default=10)
 p.add_argument("--num_parallel", type=int, default=5)
@@ -53,12 +53,15 @@ p.add_argument("--num_steps_wait", type=int, default=20)
 p.add_argument("--replan", type=int, default=10)
 p.add_argument("--commit_after", type=int, default=3)
 p.add_argument("--wm_ckpt", default=f"{G}/results/wm_large8k/wm.pt")
-p.add_argument("--goal_type", default="timed", choices=["timed", "final"],
+p.add_argument("--goal_type", default="timed", choices=["timed", "final", "image"],
                help="timed: demo-average features 1.6 s ahead of the current time (a goal video); final: last frame only")
 p.add_argument("--seed", type=int, default=7)
 p.add_argument("--switch_offset", type=int, default=None, help="steering probe: start from task s=(t+off)%%10, goal of s until --switch_step, then t")
 p.add_argument("--switch_step", type=int, default=40)
 p.add_argument("--save_gifs", type=int, default=0, help="write captioned GIFs for the first N trials of each task")
+p.add_argument("--vlm", default=None, help="RoboBrain checkpoint dir (mode vlm: picks the command from current + goal image)")
+p.add_argument("--vlm_device", default="cuda:1")
+p.add_argument("--vlm_every", type=int, default=4, help="re-query RoboBrain every N replans (0.5 s each)")
 p.add_argument("--output_dir", required=True)
 a = p.parse_args()
 os.makedirs(a.output_dir, exist_ok=True)
@@ -126,7 +129,10 @@ def goal_features(task_langs):
     for lang in task_langs:
         rows_t = np.nonzero(tidx == name2idx[norm(lang)])[0]
         starts = rows_t[fr[rows_t] == 0]  # first row of each demo of this task (episodes are contiguous)
-        if a.goal_type == "final":
+        if a.goal_type == "image":  # ONE demo's final frame: the same goal the VLM sees
+            out[lang] = torch.from_numpy(np.asarray(feats[starts[0] + L[starts[0]] - 1], dtype=np.float32))[None].to(dev)
+            GOAL_ROWS[lang] = int(starts[0] + L[starts[0]] - 1)
+        elif a.goal_type == "final":
             out[lang] = torch.from_numpy(np.asarray(feats[starts + L[starts] - 1], dtype=np.float32).mean(0))[None].to(dev)
         else:  # time-indexed reference every 0.4 s: mean over demos of the frame at that time (clamped to each demo's end)
             T = int(L[starts].max())
@@ -134,6 +140,19 @@ def goal_features(task_langs):
             out[lang] = torch.from_numpy(np.stack(ref)).to(dev)
         print(f"goal '{lang}': {len(starts)} demos, {out[lang].shape[0]} reference points", flush=True)
     return out
+
+
+GOAL_ROWS: dict = {}
+
+
+def goal_images(langs):
+    import importlib
+    T = importlib.import_module("07_train_hybrid")
+    m = np.load(f"{G}/results/feat_cache/meta.npz")
+    reader = T.FrameReader({"episode_index": torch.from_numpy(m["episode_index"]), "frame_index": torch.from_numpy(m["frame_index"])})
+    rows = [GOAL_ROWS[x] for x in langs]
+    ims = reader.frames(torch.tensor(rows)).permute(0, 2, 3, 1).numpy()
+    return {x: im for x, im in zip(langs, ims)}
 
 
 def goal_at(goals, lang, step):
@@ -208,6 +227,11 @@ async def main():
     suite = benchmark.get_benchmark_dict()["libero_goal"]()
     langs = [suite.get_task(i).language for i in range(suite.n_tasks)]
     goals = goal_features(langs)
+    vlm = gimg = None
+    if a.mode == "vlm":
+        from robobrain import RoboBrain, first_int, goal_choice_prompt
+        gimg = goal_images(langs)
+        vlm = RoboBrain(a.vlm, device=a.vlm_device)
     P = a.num_parallel
     Kc = len(langs) if a.mode in ("wm", "wm_commit") else 1
     summary = {"mode": a.mode, "wm_ckpt": a.wm_ckpt, "tasks": {}}
@@ -249,10 +273,18 @@ async def main():
                                 cand[i] = [None]
                             elif a.mode == "random":
                                 cand[i] = [random.randrange(len(langs))]
+                            elif a.mode == "vlm":
+                                cand[i] = [committed[i] if committed[i] is not None else 0]
                             elif a.mode == "wm_commit" and committed[i] is not None:
                                 cand[i] = [committed[i]]
                             else:
                                 cand[i] = list(range(len(langs)))
+                        if a.mode == "vlm" and len(picks[live[0]]) % a.vlm_every == 0:  # RoboBrain: current scene + goal image -> command
+                            qs = [([extract_libero_images(obs[i])["image"], gimg[langs[tid]]], goal_choice_prompt(langs)) for i in live]
+                            for i, ans in zip(live, vlm.ask(qs, max_new_tokens=6)):
+                                k = first_int(ans, 1, len(langs))
+                                committed[i] = (k - 1) if k else (committed[i] if committed[i] is not None else random.randrange(len(langs)))
+                                cand[i] = [committed[i]]
                         idx, raws = [], []
                         for i in live:
                             for j, c in enumerate(cand[i]):

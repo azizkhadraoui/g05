@@ -14,6 +14,8 @@
 | **Memory** | LIBERO-Mem repetition tasks, fine-tuned G0.5 + a memory module that counts cycles and stops at N (§8h) | 5.8% alone; 4.2% with a current-frame (Markovian) counter | **19.2%** (oracle counter: 41.7%) | p = 0.003 vs alone; p = 5e-4 vs Markovian |
 | **Steering** | Switch-recovery fine-tune vs matched control (LIBERO-Goal, §7) | 20% after a mid-task switch | **28%** (released G0.5: 29–31%) | p = 0.008 |
 | Steering via world model | Goal video switches at 2 s (§8g) | 32% when the command switches instead | 15% | worse, p = 5e-4 |
+| Embodied VLM planner | RoboBrain 2.5-4B picks the command from a single goal image (§8i) | 24%: our world model with the same goal image | **42%** | p = 0.005 |
+| Embodied VLM as memory / counter | RoboBrain zero-shot (§8i) | 40% (MEM-2) / 5.8% (LIBERO-Mem) | 36% / 2.5% | no gain |
 
 ## 1. Summary
 
@@ -345,7 +347,7 @@ LIBERO-Spatial has two identical bowls. After pick-up, only the history shows wh
 - **Scaling helps**: 2.7M → 17M → 43M parameters improves every horizon.
 - **The multi-step loss matters for long rollouts**: 0.317 vs 0.344 at 1.6 s.
 - **The model is data-efficient**: a quarter of the data costs only ~6%.
-- **Memory in the world model gives a 0.4% gain**, which is significant at 0.4–0.8 s but negligible in size.
+- **Memory in the world model gives a 0.4% gain**, which is significant at 0.4–0.8 s but negligible in size. Removing the memory raises its error by 4–14%, so the model does read it. **Given the actions, LIBERO physics is Markovian. Memory is valuable for task identity, not for dynamics.**
 
 ### 8f. LIBERO-Mem (standard non-Markovian benchmark; Chung et al., arXiv 2511.11478)
 
@@ -480,7 +482,36 @@ Per task, expert fine-tune (success out of 20):
 - **The fine-tuned G0.5 can do the cycles but not stop.** Subgoal completion is 59%, yet final success is 6%: it keeps going and overshoots. That's the non-Markovian failure LIBERO-Mem was built to expose.
 - **Memory fixes much of it, a Markovian module doesn't.** The episodic-memory counter triples success (5.8% → 19.2%). The same module reading only the current frame is no better than no module (4.2%).
 - **There's large headroom.** A perfect counter reaches 41.7% (57.5% on the bowl tasks), so the learned counter captures about 40% of the gain. Its errors are mostly premature halts at high counts (5×/7×), where counting from video is hardest.
-- **The bottle tasks are near zero for every condition.** The benchmark's checker also fails 95% of human-demo replays on them (§8f), so they mostly measure the checker. Removing the memory raises its error by 4–14%, so the model does read it. **Given the actions, LIBERO physics is Markovian. Memory is valuable for task identity, not for dynamics.**
+- **The bottle tasks are near zero for every condition.** The benchmark's checker also fails 95% of human-demo replays on them (§8f), so they mostly measure the checker.
+
+### 8i. RoboBrain (BAAI embodied VLM) as the high-level layer, zero-shot
+
+**Why.** The memory modules and planner above used LIBERO-specific pieces: classifiers trained on LIBERO demos, the fixed list of LIBERO commands, and demo goal videos. A general embodied VLM would remove them. RoboBrain 2.0-3B and 2.5-4B (Qwen-VL based; outputs text, points and trajectories) ran on a second T4 next to the G0.5 server (`jobs/robobrain.py`, `59`, `61`, `62`, `65`).
+
+**Offline**, on 86 held-out LIBERO-Goal demos (chance 10%):
+
+| Question | RoboBrain 2.0-3B | RoboBrain 2.5-4B |
+|---|---|---|
+| Which task? (5 frames over 2 s) | 9% | 16% |
+| Which task? (current frame) | 6% | 9% |
+| Which command reaches this goal image? | 6% | 37% |
+
+- **It barely perceives the scenes.** 2.0-3B describes a LIBERO frame as "a table with a black and white square box, a round object…".
+- **Our setup isn't the cause.** Numbers, letters or free-text answers; 256 vs 448 px; fp16 vs fp32: none changes the result (`61b_robobrain_diag.py`).
+
+**Closed loop**, RoboBrain 2.5-4B, paired with the earlier runs (exact McNemar):
+
+| Role | Baseline | RoboBrain | Task-trained module |
+|---|---|---|---|
+| MEM-2 memory (instruction withdrawn at 2 s) | no memory 40% | 5 frames 36% (p = 0.5); current frame 31% (p = 0.05, worse). Task named correctly 18%. | trained classifier 86% (p = 8e-13 vs RoboBrain) |
+| LIBERO-Mem counter (stop at N; expert fine-tune) | alone 5.8% | whole episode 2.5%; current frame 4.2% | trained counter 19.2% (p = 9e-5 vs RoboBrain) |
+| Planner from a **single goal image** (one demo's final frame) | random 2% | **42%**, command re-chosen every 2 s (p = 1e-10 vs random) | our world model, same goal image: 24%. **RoboBrain better, p = 0.005.** World model with a goal video: 77%, better than RoboBrain, p = 5e-6. |
+
+**Interpretation**
+- **Zero-shot, the embodied VLM is not grounded enough in LIBERO's simulated scenes** to serve as memory or counter. Its wrong reminders are worse than none.
+- **It is better than our world model at choosing a distant goal.** Semantic reasoning ("which instruction produces this end state") beats feature matching to a far-away image.
+- **The world model is better at near-term matching.** With subgoals it reaches 77%.
+- **They are complementary.** Next: VLM proposes the command or subgoal, world model checks the chunks, G0.5 executes. RoboBrain should also be re-tested on real camera images, which are closer to its training data, and with a light fine-tune on our scenes.
 
 ---
 
