@@ -9,3 +9,9 @@ __pycache__/
 *.npz
 *.mp4
 .venv*/
+
+# LaTeX build files
+*.aux
+*.log
+*.out
+*.toc

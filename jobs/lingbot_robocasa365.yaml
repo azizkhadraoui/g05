@@ -1,0 +1,63 @@
+# LingBot-VLA 2.0 robot config for RoboCasa365 (copied to <lingbot repo>/configs/robot_configs/robocasa365.yaml).
+# Raw LeRobot features (data/rc365_v30, as written by GR00T's RoboCasa365 conversion; same order the harness sends):
+#   observation.state [16] = base_position(3) base_rotation(4) eef_position_relative(3) eef_rotation_relative(4) gripper_qpos(2)
+#   action [12]            = base_motion(4: x, y, yaw, torso) control_mode(1) eef_position(3) eef_rotation(3) gripper_close(1)
+# Unified slots follow the pretraining layout (arm, end, effector, waist, head, base, hand). Arm/eef actions are the
+# controller's deltas, so no state subtraction; the torso and the base/arm control mode share the waist slot.
+states:
+  - observation.state.end.position:
+      origin_keys:
+        - observation.state:
+            start: 7
+            end: 14
+  - observation.state.effector.position:
+      origin_keys:
+        - observation.state:
+            start: 14
+            end: 16
+  - observation.state.base.position:
+      origin_keys:
+        - observation.state:
+            start: 0
+            end: 3
+  - observation.state.waist.position:
+      origin_keys:
+        - observation.state:
+            start: 3
+            end: 7
+
+actions:
+  - action.end.position:
+      origin_keys:
+        - action:
+            start: 5
+            end: 11
+      subtract_state: False
+  - action.effector.position:
+      origin_keys:
+        - action:
+            start: 11
+            end: 12
+      subtract_state: False
+  - action.base.position:
+      origin_keys:
+        - action:
+            start: 0
+            end: 3
+      subtract_state: False
+  - action.waist.position:
+      origin_keys:
+        - action:
+            start: 3
+            end: 5
+      subtract_state: False
+
+images:
+  - observation.images.camera_top:
+      origin_keys: observation.images.robot0_agentview_left
+  - observation.images.camera_wrist_left:
+      origin_keys: observation.images.robot0_eye_in_hand
+  - observation.images.camera_wrist_right:
+      origin_keys: observation.images.robot0_agentview_right
+
+norm_stats: assets/norm_stats/robocasa365.json

@@ -62,6 +62,7 @@ p.add_argument("--save_gifs", type=int, default=0, help="write captioned GIFs fo
 p.add_argument("--vlm", default=None, help="RoboBrain checkpoint dir (mode vlm: picks the command from current + goal image)")
 p.add_argument("--vlm_device", default="cuda:1")
 p.add_argument("--vlm_every", type=int, default=4, help="re-query RoboBrain every N replans (0.5 s each)")
+p.add_argument("--log_trials", type=int, default=0, help="save frames + per-replan scores/choices for the first N trials (video overlays)")
 p.add_argument("--output_dir", required=True)
 a = p.parse_args()
 os.makedirs(a.output_dir, exist_ok=True)
@@ -261,6 +262,7 @@ async def main():
                         obs = [ob if ob is not None else o for ob, o in zip(obs_b, obs)]
                     done = [False] * P; step = 0
                     gif_fr = [[] for _ in range(P)]; gif_cap = [[] for _ in range(P)]
+                    vlog = [{"frames": [], "steps": [], "replans": []} for _ in range(P)]; last_sc = [None] * P; last_vlm = [None] * P
                     picks = [[] for _ in range(P)]; score_sum = [np.zeros(len(langs)) for _ in range(P)]; committed = [None] * P
                     while step < a.max_steps and any(active[i] and not done[i] for i in range(P)):
                         live = [i for i in range(P) if active[i] and not done[i]]
@@ -282,7 +284,7 @@ async def main():
                         if a.mode == "vlm" and len(picks[live[0]]) % a.vlm_every == 0:  # RoboBrain: current scene + goal image -> command
                             qs = [([extract_libero_images(obs[i])["image"], gimg[langs[tid]]], goal_choice_prompt(langs)) for i in live]
                             for i, ans in zip(live, vlm.ask(qs, max_new_tokens=6)):
-                                k = first_int(ans, 1, len(langs))
+                                k = first_int(ans, 1, len(langs)); last_vlm[i] = ans
                                 committed[i] = (k - 1) if k else (committed[i] if committed[i] is not None else random.randrange(len(langs)))
                                 cand[i] = [committed[i]]
                         idx, raws = [], []
@@ -301,12 +303,16 @@ async def main():
                             else:
                                 g_now = goal_at(goals, langs[src], step) if (src != tid and step < a.switch_step) else                                     goal_at(goals, langs[tid], step - (a.switch_step if src != tid else 0))
                                 sc = wm_scores(cur[i], np.stack([chunk_to_wm(c, obs[i]) for c in chunks]).astype(np.float32), g_now)
-                                score_sum[i] += (sc - sc.mean()) / (sc.std() + 1e-8)
+                                score_sum[i] += (sc - sc.mean()) / (sc.std() + 1e-8); last_sc[i] = sc
                                 b = int(np.argmin(sc))
                                 chosen[i] = (chunks[b], cand[i][b])
                                 if a.mode == "wm_commit" and len(picks[i]) + 1 >= a.commit_after:
                                     committed[i] = int(np.argmin(score_sum[i]))
                             picks[i].append(chosen[i][1])
+                            if i < n and ids[i] < a.log_trials:
+                                vlog[i]["replans"].append({"step": step, "choice": chosen[i][1], "scores": None if last_sc[i] is None else [float(x) for x in last_sc[i]],
+                                                           "vlm": last_vlm[i], "goal_task": int(src if (src != tid and step < a.switch_step) else tid)})
+                                last_sc[i] = None; last_vlm[i] = None
                         for s in range(a.replan):
                             acts = [LIBERO_DUMMY_ACTION] * P; mask = [False] * P
                             for i in live:
@@ -320,6 +326,8 @@ async def main():
                             for i in range(P):
                                 if mask[i]:
                                     obs[i] = obs_b[i]
+                                    if i < n and ids[i] < a.log_trials:
+                                        vlog[i]["frames"].append(extract_libero_images(obs[i])["image"]); vlog[i]["steps"].append(step)
                                     if i < n and ids[i] % max(a.trials, 1) < a.save_gifs and step % 2 == 0:
                                         c_ = chosen[i][1]
                                         gif_fr[i].append(extract_libero_images(obs[i])["image"])
@@ -328,6 +336,11 @@ async def main():
                                         done[i] = True
                             step += 1
                     for i in range(n):
+                        if vlog[i]["frames"]:
+                            os.makedirs(f"{a.output_dir}/logs", exist_ok=True)
+                            np.savez_compressed(f"{a.output_dir}/logs/{a.mode}_task{tid}_trial{ids[i]}.npz", frames=np.stack(vlog[i]["frames"]),
+                                                steps=np.array(vlog[i]["steps"]), success=done[i], task=tid, langs=np.array(langs),
+                                                replans=json.dumps(vlog[i]["replans"]))
                         if gif_fr[i]:
                             os.makedirs(f"{a.output_dir}/gifs", exist_ok=True)
                             hdr = (f"GOAL VIDEO: {langs[tid]}" if a.mode.startswith("wm") else f"{a.mode.upper()}: target = {langs[tid]}")

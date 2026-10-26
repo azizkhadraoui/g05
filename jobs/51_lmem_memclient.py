@@ -126,6 +126,10 @@ TRIAL_LMDONE: dict = {}
 HALT_CFG = None  # memory module: {"mode", "n", "dec", "cond", "lam", "H"}
 HBUF: dict = {}; HSTEP: dict = {}; HALT: dict = {}; HCNT: dict = {}; HPRED: dict = {}
 TRIAL_HALT: dict = {}
+HINS: dict = {}; HTR: dict = {}  # instr_* modes (LIBERO-Mem tasks 6-9): env -> current step instruction / oracle step tracker
+# noise steering on 94_frs_serve.py: {"mode": none | dsbc | noise, "temp", "prefix" (record tag), "off" (init offset), "rng"}
+FRS_CLI: dict = {"mode": "none", "prefix": None}
+REQ_K: dict = {}  # env -> [(policy step, oracle-tracker steps or -1, benchmark subgoals)] per request: labels for 140
 
 
 def _halt_load(mode, dec_path, n_target):
@@ -138,9 +142,12 @@ def _halt_load(mode, dec_path, n_target):
         from robobrain import RoboBrain
         cfg.update(vlm=RoboBrain(VLM_ARGS["path"], device=VLM_ARGS["device"]), obj=VLM_ARGS["obj"], every=VLM_ARGS["every"])
         return cfg
-    if mode in ("memory", "current"):
+    if mode in ("instr_oracle", "proprio"):  # oracle step instructions / activity-log counter (robot's own sensors)
+        return cfg
+    if mode in ("memory", "current", "instr_memory", "instr_current"):
         ck = _t.load(dec_path, map_location="cpu", weights_only=False)
-        d = _D(ck["n_frames"], 9); d.load_state_dict(ck["model"]); d.eval().cuda()
+        d = _D(ck["n_frames"], ck.get("n_classes", 9)); d.load_state_dict(ck["model"]); d.eval().cuda()
+        cfg["classes"] = ck.get("classes")
         lam = _H.load_lawm(device="cpu")  # only the DINOv3 encoder goes to the GPU (shares it with the policy server)
         lam.vision_encoder.to("cuda")
         cfg.update(dec=d, cond=ck["cond"], lam=lam, H=_H)
@@ -200,6 +207,32 @@ def _halt_update(obs_list, active):
         return
     if HALT_CFG["mode"] in ("vlm", "vlm_current"):
         return _halt_update_vlm(obs_list, active)
+    if HALT_CFG["mode"] == "proprio":  # activity log: count own grasp-lift-release cycles, halt at N (lmem_proprio.py)
+        from lmem_proprio import ProprioCounter
+        for i, ob in enumerate(obs_list):
+            if ob is None or not active[i] or HALT.get(i):
+                continue
+            HSTEP[i] = HSTEP.get(i, 0) + 1
+            n = HTR.setdefault(i, ProprioCounter()).update(ob["robot0_gripper_qpos"], ob["robot0_eef_pos"][2])
+            HPRED.setdefault(i, []).append(n)
+            if n >= HALT_CFG["n"]:
+                HALT[i] = True; TRIAL_HALT[i] = HSTEP[i]
+        return
+    if HALT_CFG["mode"] == "instr_oracle":
+        import lmem_steps as _S
+        for i, ob in enumerate(obs_list):
+            if ob is None or not active[i] or HALT.get(i):
+                continue
+            HSTEP[i] = HSTEP.get(i, 0) + 1
+            pos = {n: ob[f"{n}_pos"] for n in _S.objects(HALT_CFG["tid"])}
+            if i not in HTR:
+                HTR[i] = _S.StepTracker(HALT_CFG["tid"], pos)
+            else:
+                HTR[i].update(pos)
+            HINS[i] = HTR[i].oracle_next()
+            if HINS[i] == _S.DONE:
+                HALT[i] = True; TRIAL_HALT[i] = HSTEP[i]
+        return
     newf = []
     for i, ob in enumerate(obs_list):
         if ob is None or not active[i] or HALT.get(i):
@@ -226,13 +259,21 @@ def _halt_update(obs_list, active):
         with _t.no_grad(), _t.autocast("cuda", dtype=_t.float16):
             pred = int(HALT_CFG["dec"](_halt_frames(HBUF[i])).float().argmax(-1).item())
         HPRED.setdefault(i, []).append(pred)
+        if HALT_CFG["mode"].startswith("instr_"):  # the decoder names the next step; "" (done) on 2 frames halts
+            text = HALT_CFG["classes"][pred]
+            if text:
+                HINS[i] = text
+            HCNT[i] = HCNT.get(i, 0) + 1 if not text else 0
+            if HCNT[i] >= 2:
+                HALT[i] = True; TRIAL_HALT[i] = HSTEP[i]
+            continue
         HCNT[i] = HCNT.get(i, 0) + 1 if pred >= HALT_CFG["n"] else 0
         if HCNT[i] >= 2:
             HALT[i] = True; TRIAL_HALT[i] = HSTEP[i]
 
 
 def _halt_reset(i):
-    for d in (HBUF, HSTEP, HALT, HCNT, HPRED, LM_DONE, TRIAL_HALT):
+    for d in (HBUF, HSTEP, HALT, HCNT, HPRED, LM_DONE, TRIAL_HALT, HINS, HTR, REQ_K):
         d.pop(i, None)
 
 
@@ -425,7 +466,9 @@ async def run_parallel_task(
         trial_successes[tid] = success
         TRIAL_LMSUB[tid] = LM_SUB.pop(env_idx, 0)
         TRIAL_LMDONE[tid] = {"final_done": bool(LM_DONE.get(env_idx, False)), "halt_step": TRIAL_HALT.get(env_idx),
-                             "pred_counts": HPRED.get(env_idx, [])[::5]}
+                             "pred_counts": HPRED.get(env_idx, []), "req_k": REQ_K.pop(env_idx, [])}
+        TRIAL_LMDONE[tid]["k_end"] = [int(env_action_step[env_idx]),  # counts at the end (a last step may end the episode)
+                                      len(HTR[env_idx].events) if hasattr(HTR.get(env_idx), "events") else -1, TRIAL_LMSUB[tid]]
         _halt_reset(env_idx)
         if env_minf[env_idx] is not None:
             trial_inferred[tid] = env_minf[env_idx]
@@ -681,6 +724,8 @@ async def run_parallel_task(
         current_steps_list = []
         for i in recompute_envs:
             _txt = prompt_fn(env_action_step[i]) if prompt_fn else task_description
+            if HALT_CFG is not None and HALT_CFG["mode"].startswith("instr_") and HINS.get(i):
+                _txt = HINS[i]  # the memory module's current step instruction
             if _txt == MEMORY_TOKEN:
                 if env_minf[i] is None:  # retrieve once, when the instruction is lost
                     _cur = _mem_feats([extract_libero_images(per_env_obs[i])["image"]])[0]
@@ -692,6 +737,15 @@ async def run_parallel_task(
                 task_description=_txt,
                 embodiment_type=embodiment_type,
             )
+            if FRS_CLI["prefix"]:  # the server saves this request with its exact noise (DSBC data, 140_lmem_dsbc.py)
+                raw_obs["rec_tag"] = f"{FRS_CLI['prefix']}_t{task_id}_tr{env_trial_id[i] + FRS_CLI['off']}_s{env_action_step[i]}"
+            if FRS_CLI["mode"] == "dsbc":
+                raw_obs["frs_mode"] = "dsbc"
+            elif FRS_CLI["mode"] == "noise":  # explicit starting noise; temp 0 = the sampler's deterministic mode
+                raw_obs["frs_mode"] = "noise"
+                raw_obs["z_init"] = (FRS_CLI["rng"].standard_normal((32, 20)) * FRS_CLI["temp"]).astype(np.float32)
+            REQ_K.setdefault(i, []).append((int(env_action_step[i]), len(HTR[i].events) if hasattr(HTR.get(i), "events") else -1,
+                                            int(LM_SUB.get(i, 0))))
             raw_obs_list.append(raw_obs)
             current_steps_list.append(env_action_step[i])
 
@@ -815,9 +869,12 @@ async def evaluate(args, cfg, embodiment_type: str | None) -> dict[str, Any]:
     global HALT_CFG
     if args.memory_decoder:
         MEM = _mem_load(args.memory_decoder, args.memory_tau)
+    FRS_CLI.update(mode=args.frs_mode, temp=args.noise_temp, prefix=args.rec_prefix, off=args.init_offset,
+                   rng=np.random.default_rng(args.seed if args.seed is not None else 0))
     if args.halt_mode != "none":
         VLM_ARGS.update(path=args.count_vlm, device=args.vlm_device, obj=args.count_object, every=args.vlm_every)
         HALT_CFG = _halt_load(args.halt_mode, args.count_decoder, args.n_target)
+        HALT_CFG["tid"] = args.task_id
     ensure_libero_import()
     ensure_libero_config()
     from libero.libero import benchmark
@@ -916,6 +973,9 @@ async def evaluate(args, cfg, embodiment_type: str | None) -> dict[str, Any]:
                 )
                 task_result["init_task_id"] = init_tid
                 task_result["prompt_schedule"] = args.prompt_schedule
+                task_result["init_offset"] = args.init_offset
+                task_result["frs"] = {"mode": FRS_CLI["mode"], "temp": FRS_CLI.get("temp"), "rec_prefix": FRS_CLI["prefix"],
+                                      "init_offset": args.init_offset}
             finally:
                 await asyncio.to_thread(vec_env.close)
 
@@ -948,8 +1008,14 @@ def parse_args():
     parser.add_argument("--task_id", type=int, default=None)
     parser.add_argument("--max_steps", type=int, default=None, help="override the per-suite step budget (LIBERO-Mem)")
     parser.add_argument("--init_offset", type=int, default=0, help="first initial state to use (LIBERO-Mem held-out: 100)")
+    parser.add_argument("--frs_mode", default="none", choices=["none", "dsbc", "noise"],
+                        help="94_frs_serve.py noise steering: dsbc = noise policy (server DSBC_CKPT); noise = Gaussian x --noise_temp")
+    parser.add_argument("--noise_temp", type=float, default=1.0, help="frs_mode noise: noise scale (0 = deterministic sampler)")
+    parser.add_argument("--rec_prefix", default=None, help="tag every request PREFIX_t{task}_tr{init state}_s{step}: the "
+                        "server (REC_DIR) saves it with its exact noise")
     parser.add_argument("--prompt_text", default=None, help="instruction given to the policy instead of the task's own")
-    parser.add_argument("--halt_mode", default="none", choices=["none", "memory", "current", "oracle", "vlm", "vlm_current"])
+    parser.add_argument("--halt_mode", default="none", choices=["none", "memory", "current", "oracle", "vlm", "vlm_current",
+                                                                "instr_memory", "instr_current", "instr_oracle", "proprio"])
     parser.add_argument("--count_vlm", default=None, help="RoboBrain checkpoint dir (halt_mode vlm / vlm_current)")
     parser.add_argument("--count_object", default="bowl", choices=["bowl", "bottle"])
     parser.add_argument("--vlm_every", type=int, default=20, help="query RoboBrain every N env steps")

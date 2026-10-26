@@ -18,6 +18,10 @@ export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export WANDB_PROJECT=g05_lawam
 export PY=$PROJECT_ROOT/.venv/bin/python
 [ -f $PROJECT_ROOT/.venv/bin/activate ] && source $PROJECT_ROOT/.venv/bin/activate
+# V100 nodes (sm70): the .venv torch build (cu128) has no Volta kernels -> its cu126 twin (jobs/39_venv_sm70.sh, pins: 139)
+if [ -x $PROJECT_ROOT/.venv_sm70/bin/python ] && nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | grep -q V100; then
+    export PY=$PROJECT_ROOT/.venv_sm70/bin/python; source $PROJECT_ROOT/.venv_sm70/bin/activate
+fi
 # torchcodec: the venv carries the CPU torchcodec 0.4.0 from PyPI with RPATH -> $G05_ROOT/ffmpeg/lib (jobs/03_fix_deps.sh);
 # re-run 03 after any `uv sync`. Do NOT put ffmpeg/lib on LD_LIBRARY_PATH: it shadows system libs (suspected gcc/Triton crash).
 # Newer C++ runtime first (conda-forge libstdc++ / libgcc_s only, symlinked from ffmpeg/lib): the conda FFmpeg's ICU

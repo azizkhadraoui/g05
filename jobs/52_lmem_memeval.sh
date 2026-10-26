@@ -12,6 +12,7 @@
 #   C  single-cycle + memory module (full-episode memory counts cycles, halts at N)
 #   D  single-cycle + current-frame module      (Markovian control)
 #   E  single-cycle + oracle counter             (upper bound)
+#   P  single-cycle + activity-log counter (own grasp-lift-release cycles from gripper and hand height; lmem_proprio.py)
 #   F  single-cycle + RoboBrain counter, 8 frames over the episode + now (needs VLM=<ckpt dir>, 2 GPUs)
 #   G  single-cycle + RoboBrain counter, current frame only
 # Env: NAME, CONDS="A B C D E", TASKS="0 1 2 3 4 5", HYBRID_CKPT, EXPERT_CKPT (optional), TRIALS=20
@@ -41,6 +42,7 @@ for c in ${CONDS:-A B C D E}; do for t in ${TASKS:-0 1 2 3 4 5}; do
     C) ARGS+=(--prompt_text "${SINGLE[${OBJ[$t]}]}" --halt_mode memory --count_decoder $G05_ROOT/results/lmem_count/cyc_uniform8_decoder.pt) ;;
     D) ARGS+=(--prompt_text "${SINGLE[${OBJ[$t]}]}" --halt_mode current --count_decoder $G05_ROOT/results/lmem_count/cyc_current_decoder.pt) ;;
     E) ARGS+=(--prompt_text "${SINGLE[${OBJ[$t]}]}" --halt_mode oracle) ;;
+    P) ARGS+=(--prompt_text "${SINGLE[${OBJ[$t]}]}" --halt_mode proprio) ;;  # activity log: own grasp-lift-release cycles
     F) ARGS+=(--prompt_text "${SINGLE[${OBJ[$t]}]}" --halt_mode vlm --count_vlm $VLM --count_object ${OBJ[$t]}) ;;
     G) ARGS+=(--prompt_text "${SINGLE[${OBJ[$t]}]}" --halt_mode vlm_current --count_vlm $VLM --count_object ${OBJ[$t]}) ;;
   esac

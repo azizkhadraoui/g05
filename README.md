@@ -1,6 +1,66 @@
-# G0.5 × LaWAM: world models, memory and steerability for a VLA
+# Robot stack for a VLA: steering, world models, memory and planning
 
-**Policy:** Galaxea G0.5 (flow-matching) · **World models:** LaWAM pretrained (538M), ours (3–43M) · **Memory:** external modules · **Test:** LIBERO simulator, closed loop · **Date:** October 2026
+Two phases, both on Galaxea G0.5 (flow-matching) in simulation, with a planner, memory, world-model and steering modules around it.
+
+| Document | Content |
+|---|---|
+| [`reports/supervisor_brief.pdf`](reports/supervisor_brief.pdf) | Short brief: experiments and insights, then the proposal (motion expert, steering, world model, memory, planner, data and training) |
+| [`reports/e2e_stack_report.pdf`](reports/e2e_stack_report.pdf) | Full technical report: literature, design choices, all experiments, data quality, compute, status |
+| [`RESULTS.md`](RESULTS.md) | Phase 1 results log |
+
+---
+
+## Phase 2 (22–26 October 2026): the end-to-end stack
+
+**Setting:** a three-step kitchen mission benchmark (LIBERO-Goal scene) where each step stresses one module: a lost command (memory), a change of mind (planner + steering) and a goal given only as a photo (world model). Planners: Qwen3-VL-4B and RoboBrain 2.5-4B. Inputs are what a robot would have: cameras, its own sensors and the user's words or photo.
+
+| Question | Answer | Key numbers |
+|---|---|---|
+| Can a learned module redirect a frozen VLA after a change of instruction? | **Yes: a noise policy** | It picks the starting noise of G0.5's sampler from the cameras, robot state and new command: **19.5% → 40%** new tasks completed (200 held-out trials), same as a 2 s pointing nudge (43.5%) but with no target. Zero noise: 21.5%. |
+| What redirects best inside full missions? | **Stop, set down, retract, re-command** | **96%** of changed steps vs ≈50% for the nudge or the noise policy, 13% with no steering. Setting a held object down first keeps the success rate; no arm contact in ≈480 retractions. |
+| Does training G0.5's own weights through the learned world model and critic help? | **No** | Normal anchor: **0/200** and its own tasks break (99 → 0/100). Strong anchor: 40/200 vs 39/200 for G0.5 alone. |
+| Where does a world model help inside missions? | **At the subtask level** | A model that imagines the scene at the *end* of each candidate command reads **53/53** goal photos (planner: 11/54) and lifts missions from **3/80 to 26/80**. As a motion checker or with 1.6 s of imagination: no gain. |
+| What memory does a household robot need? | **Structured memories outside the VLA** | Interruptions: only an activity log resumes at the right step (**60%** vs 0%). Standing instructions stored as rules: violations **20/30 → 0/30**. Counts the camera cannot see: activity counter **20.8%** vs 5.8%. |
+| Which planner? | **Qwen3-VL-4B** | Parses 76/80 spoken missions vs 60/80 for RoboBrain 2.5-4B; both read goal photos poorly and ignore rules kept only in context. |
+| Can a noise policy fix a weak skill? | **No; zero noise helps** | LIBERO-Mem bowl and basket steps: learned noise 9/80 vs 27/80 with G0.5's own noise; zero noise 36/80 (baskets 35 vs 26/40). Bowl moves stay weak in every condition. |
+| Which motion expert on RoboCasa365? | **Large spread** | Awomo-0.5I 60%, π0.5 23% (50 tasks × 2 trials, shared harness). LingBot-VLA 2.0 post-training in progress. |
+| Which world model predicts real household motion? | **FLUX 3 Action** | Folding: 0.70× the error of holding still (DROID clips); RoboJEPA improves with size (0.81 → 0.66×) and plans 4× faster with gradients than with CEM. |
+
+**In progress:** retraction as a teacher (a vision student learns how far to back off after a change of mind; `jobs/144_retract_student.py`) and LingBot-VLA 2.0 post-training on RoboCasa365 (`jobs/135_lingbot_rc365.sh`).
+
+### Phase 2 scripts
+
+| Area | Scripts |
+|---|---|
+| Mission benchmark (planner, memory, steering, world model) | `jobs/125_e2e_missions.py`, `126_e2e_missions.sh`; options `--steer nudge\|dsbc\|home\|none`, `--retract home\|lift\|frac\|learned`, `--grip open\|keep\|place`, `--picture wm\|planner\|wm_pic\|wm_end`, `--wm_verify K` |
+| Steering on the command-switch probe | `jobs/93_frs_targets.py`, `94_frs_serve.py` (noise and reference steering server), `95_frs_client.py`, `96_frs_steer.sh` |
+| Noise policies | `jobs/109_dsbc_train.py`, `110_dsbc_train.sh` (DSBC); `119_smsteer.py`, `120_smsteer.sh` (world model + critic, SuperMimic-style; `policy` trains G0.5's own expert) |
+| Subtask-level world model | `jobs/143_endstate_wm.py`, goal pictures `142_goal_pics.py` |
+| Memory missions | `jobs/130_memory_missions.py` (event log, rules, transcript, view); `lmem_proprio.py`, `138_proprio_check.py` (activity counter); `lmem_steps.py`, `131–133` (LIBERO-Mem step instructions) |
+| Weak-skill noise policy | `jobs/140_lmem_dsbc.py`, `141_lmem_dsbc.sh` |
+| Retraction student | `jobs/144_retract_student.py` |
+| Planner on RoboCasa365 | `jobs/128_planner_server.py`, `planned_rc365_policy.py`, `129_planned_eval.sh` |
+| Motion-expert benchmark | `jobs/79–87`, `111_gr00t_eval.sh`, `115_pi05_eval.sh`, `*_rc365_policy.py`; LingBot `127`, `134–137`, `lingbot_robocasa365.yaml` |
+| Household world-model evaluation | `jobs/89–92`, `97–108`, `118` (RoboJEPA, Cosmos, gradient planning), `112–114`, `116`, `117` (FLUX 3 Action, Cosmos policy) |
+| Preference steering (PrefPI) | `jobs/121–124` |
+| V100 environment | `env_g05.sh` (switches to the Volta venv on V100 nodes), `139_v100_env.sh`, `139_v100_smoke.py` |
+
+### Phase 2 engineering notes
+
+| Issue | Fix |
+|---|---|
+| fla's Triton gated-delta-rule kernel (G0.5's Qwen3.5 prefill) fails to compile on V100 for some prompt lengths | `t4_fp16.py` switches those layers to their fp32 PyTorch implementation on sm70 |
+| The Volta venv pulled numpy 2 / newer pillow with its torch reinstall | pinned back to the main venv's versions (`139_v100_env.sh`) |
+| torchcodec cannot load FFmpeg on some nodes | goal pictures cached as `.npy` (`142_goal_pics.py`) |
+| A `StopIteration` inside a worker thread hung the LIBERO-Mem client silently | guarded the swap-task tracker; every client call in `141` runs under a timeout |
+| LingBot-VLA 2.0 (6B) on one A100 | bf16 weights, AnyPrecisionAdamW (optional Kahan buffer), forward under bf16 autocast, `torch.compile` on; the harness adapter sends the instruction as LeRobot's `task` key and the eval writes `SHA256SUMS` |
+| Batch scripts written from Windows with CRLF line endings | sbatch rejects them; convert to LF before copying |
+
+---
+
+## Phase 1 (16–21 October 2026): G0.5 × LaWAM
+
+**Policy:** Galaxea G0.5 (flow-matching) · **World models:** LaWAM pretrained (538M), ours (3–43M) · **Memory:** external modules · **Test:** LIBERO simulator, closed loop
 
 ![Closed-loop headline results](media/fig1_closed_loop.png)
 

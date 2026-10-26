@@ -35,6 +35,8 @@ p.add_argument("--tau", type=float, default=0.15)
 p.add_argument("--labels", default=None, help="alternative per-row labels (.npy, -1 = unused), e.g. labels_cycles.npy")
 p.add_argument("--tasks", default=None, help="comma list of task ids to train/evaluate on")
 p.add_argument("--tag", default=None)
+p.add_argument("--n_classes", type=int, default=9, help="output classes (9 = counts 0-8; labels_instr.npy: 22 step instructions)")
+p.add_argument("--classes", default=None, help="json list of class names saved with the decoder (e.g. labels_instr_classes.json)")
 a = p.parse_args()
 torch.manual_seed(a.seed); np.random.seed(a.seed)
 dev = torch.device("cuda")
@@ -42,9 +44,9 @@ AMP16 = torch.cuda.get_device_capability()[0] < 8
 amp = (lambda: torch.autocast("cuda", dtype=torch.float16)) if AMP16 else (lambda: torch.autocast("cuda", dtype=torch.bfloat16))
 t0 = time.time()
 m = np.load(f"{C}/meta.npz")
-task, demo, fr, count = m["task"], m["demo"], m["frame"], np.minimum(m["count"], 8)
+task, demo, fr, count = m["task"], m["demo"], m["frame"], np.minimum(m["count"], a.n_classes - 1)
 if a.labels:
-    count = np.minimum(np.load(a.labels), 8)
+    count = np.minimum(np.load(a.labels), a.n_classes - 1)
 use = np.ones(len(task), bool) if a.tasks is None else np.isin(task, [int(x) for x in a.tasks.split(",")])
 use &= count >= 0
 feats = np.ascontiguousarray(np.load(f"{C}/feats.npy", mmap_mode="r"))
@@ -87,7 +89,7 @@ def frames_for(rows):
 nf = frames_for(np.array([100])).shape[1]
 train_rows = np.nonzero((demo < 100) & use)[0]
 eval_rows = np.nonzero((demo >= 100) & use)[0]
-model = Decoder(nf, 9).to(dev)
+model = Decoder(nf, a.n_classes).to(dev)
 opt = torch.optim.AdamW(model.parameters(), lr=a.lr, weight_decay=0.05)
 scaler = torch.cuda.amp.GradScaler(enabled=AMP16)
 lab = torch.from_numpy(count)
@@ -125,7 +127,7 @@ for t in sorted(set(tk.tolist())):
     maj = np.bincount(y[mk]).max() / mk.sum()
     res["per_task"][int(t)] = {"acc": float(ok[mk].mean()), "acc_after_first_cycle": float(ok[mk & (y >= 1)].mean()) if (mk & (y >= 1)).any() else None,
                                "majority_baseline": float(maj), "max_count": int(y[mk].max())}
-for c in range(9):
+for c in range(a.n_classes):
     mk = y == c
     if mk.any():
         res["per_count"][int(c)] = {"acc": float(ok[mk].mean()), "n": int(mk.sum())}
@@ -133,5 +135,6 @@ os.makedirs(f"{G}/results/lmem_count", exist_ok=True)
 tag = a.tag or (a.cond if a.seed == 0 else f"{a.cond}_seed{a.seed}")
 json.dump(res, open(f"{G}/results/lmem_count/{tag}.json", "w"), indent=2)
 np.savez(f"{G}/results/lmem_count/{tag}_rows.npz", rows=eval_rows, pred=pred, y=y, task=tk, demo=demo[eval_rows], frame=fr[eval_rows])
-torch.save({"model": model.state_dict(), "cond": a.cond, "n_frames": nf, "tau": a.tau}, f"{G}/results/lmem_count/{tag}_decoder.pt")
+torch.save({"model": model.state_dict(), "cond": a.cond, "n_frames": nf, "tau": a.tau, "n_classes": a.n_classes,
+            "classes": json.load(open(a.classes)) if a.classes else None}, f"{G}/results/lmem_count/{tag}_decoder.pt")
 print(json.dumps(res), flush=True)
